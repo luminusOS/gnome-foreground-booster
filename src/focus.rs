@@ -18,12 +18,12 @@ const INACTIVE_SINCE: &str = "user.xdg.inactive-since";
 const FOCUSED: &[u8] = b"-1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub enum Kind {
     Slice,
     Unit,
 }
 
-fn kind_of(name: &OsStr) -> Option<Kind> {
+pub fn kind_of(name: &OsStr) -> Option<Kind> {
     let name = name.as_bytes();
     if name.ends_with(b".slice") {
         Some(Kind::Slice)
@@ -68,6 +68,12 @@ impl Tracker {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Change {
+    Focus(Option<String>),
+    UnitAdded,
+}
+
 struct RawEvent {
     wd: i32,
     flags: ReadFlags,
@@ -80,6 +86,7 @@ pub struct FocusWatcher {
     watches: HashMap<i32, (PathBuf, Kind)>,
     tracker: Tracker,
     reported: Option<String>,
+    unit_added: bool,
 }
 
 impl FocusWatcher {
@@ -96,6 +103,7 @@ impl FocusWatcher {
             watches: HashMap::new(),
             tracker: Tracker::default(),
             reported: None,
+            unit_added: false,
         };
         watcher.rescan()?;
         Ok(watcher)
@@ -106,15 +114,18 @@ impl FocusWatcher {
         self.reported.clone()
     }
 
-    pub async fn next(&mut self) -> Result<Option<String>> {
+    pub async fn next(&mut self) -> Result<Change> {
         loop {
+            if std::mem::take(&mut self.unit_added) {
+                return Ok(Change::UnitAdded);
+            }
             for event in self.read_events().await? {
                 self.handle(event)?;
             }
             let target = self.target();
             if target != self.reported {
                 self.reported.clone_from(&target);
-                return Ok(target);
+                return Ok(Change::Focus(target));
             }
         }
     }
@@ -253,6 +264,7 @@ impl FocusWatcher {
                     Some(Kind::Unit) => {
                         let unit_focused = self.watch_unit(&child);
                         self.tracker.observe(&child, unit_focused);
+                        self.unit_added = true;
                     }
                     None => {}
                 }

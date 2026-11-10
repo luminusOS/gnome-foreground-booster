@@ -65,6 +65,10 @@ impl<C: UnitControl> Booster<C> {
         }
     }
 
+    pub fn control(&self) -> &C {
+        &self.control
+    }
+
     pub async fn recover(&mut self) {
         let Some(path) = self.state_path.as_deref() else {
             return;

@@ -4,6 +4,7 @@ use zbus::zvariant::{OwnedObjectPath, Value};
 use zbus::{Connection, Proxy};
 
 use crate::booster::{UnitControl, UnitGone};
+use crate::rescue::ScopeControl;
 
 const SYSTEMD_BUS_NAME: &str = "org.freedesktop.systemd1";
 const NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
@@ -22,6 +23,14 @@ trait Manager {
         runtime: bool,
         properties: &[(&str, Value<'_>)],
     ) -> zbus::Result<()>;
+
+    fn start_transient_unit(
+        &self,
+        name: &str,
+        mode: &str,
+        properties: &[(&str, Value<'_>)],
+        aux: &[(&str, &[(&str, Value<'_>)])],
+    ) -> zbus::Result<OwnedObjectPath>;
 }
 
 pub struct SystemdUser {
@@ -78,5 +87,29 @@ impl UnitControl for SystemdUser {
             .set_unit_properties(unit, true, &[("CPUWeight", Value::from(weight))])
             .await
             .map_err(classify)
+    }
+}
+
+impl ScopeControl for SystemdUser {
+    async fn start_scope(
+        &self,
+        name: &str,
+        slice: &str,
+        description: &str,
+        pids: &[u32],
+    ) -> Result<()> {
+        self.manager
+            .start_transient_unit(
+                name,
+                "fail",
+                &[
+                    ("PIDs", Value::from(pids.to_vec())),
+                    ("Slice", Value::from(slice)),
+                    ("Description", Value::from(description)),
+                ],
+                &[],
+            )
+            .await?;
+        Ok(())
     }
 }

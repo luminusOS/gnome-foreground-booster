@@ -4,7 +4,9 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN=${BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/gnome-foreground-booster}
 UID_=$(id -u)
-SLICE_DIR=/sys/fs/cgroup/user.slice/user-$UID_.slice/user@$UID_.service/app.slice/app-gfbe2e.slice
+MANAGER_DIR=/sys/fs/cgroup/user.slice/user-$UID_.slice/user@$UID_.service
+SLICE_DIR=$MANAGER_DIR/app.slice/app-gfbe2e.slice
+SHELL_DIR=$MANAGER_DIR/gfbe2eshell.slice/gfb-e2e-fakeshell.service
 WORK=$(mktemp -d)
 STATE_DIR=${XDG_RUNTIME_DIR:?}/gnome-foreground-booster
 FAILED=0
@@ -27,14 +29,41 @@ expect_weight() {
 }
 
 start_daemon() {
-    RUST_LOG=gnome_foreground_booster=debug "$BIN" --app-slice "$SLICE_DIR" >>"$WORK/daemon.log" 2>&1 &
+    RUST_LOG=gnome_foreground_booster=debug "$BIN" --app-slice "$SLICE_DIR" --shell-cgroup "$SHELL_DIR" >>"$WORK/daemon.log" 2>&1 &
     DAEMON=$!
     sleep 0.5
 }
 
+# Mimic GNOME Shell launching an AppImage: the launcher forks a child while
+# both are still in the Shell's cgroup, then only the launcher is moved into
+# a fresh scope.
+launch_like_shell() {
+    local name=$1
+    bash -c 'sleep 300 & echo $! >"$1"; wait' _ "$WORK/$name.child" &
+    LAUNCHER=$!
+    sleep 0.2
+    CHILD=$(cat "$WORK/$name.child")
+    echo "$LAUNCHER" >"$SHELL_DIR/cgroup.procs"
+    echo "$CHILD" >"$SHELL_DIR/cgroup.procs"
+    busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager \
+        StartTransientUnit 'ssa(sv)a(sa(sv))' "gfb-e2e-$name.scope" fail 2 PIDs au 1 "$LAUNCHER" Slice s app-gfbe2e.slice 0 >/dev/null
+}
+
+expect_cgroup() {
+    local pid=$1 want=$2 got= i
+    for i in $(seq 1 40); do
+        got=$(sed 's|.*/||' "/proc/$pid/cgroup")
+        [ "$got" = "$want" ] && { echo "ok   $3"; return; }
+        sleep 0.1
+    done
+    echo "FAIL $3 (pid $pid: wanted '$want', got '$got')"
+    FAILED=1
+}
+
 cleanup() {
     [ -n "$DAEMON" ] && kill "$DAEMON" 2>/dev/null && wait "$DAEMON" 2>/dev/null
-    systemctl --user stop gfb-e2e-a gfb-e2e-b gfb-e2e-c app-gfbe2e-nested.slice app-gfbe2e.slice 2>/dev/null
+    systemctl --user stop gfb-e2e-a gfb-e2e-b gfb-e2e-c gfb-e2e-fakeshell app-gfbe2e-nested.slice app-gfbe2e.slice gfbe2eshell.slice 2>/dev/null
+    jobs -p | xargs -r kill 2>/dev/null
     rm -rf "$WORK" "$STATE_DIR/state"
 }
 trap cleanup EXIT
@@ -49,12 +78,21 @@ fi
 systemd-run --user --quiet --slice=app-gfbe2e.slice --unit=gfb-e2e-a sleep 300
 systemd-run --user --quiet --slice=app-gfbe2e.slice --unit=gfb-e2e-b sleep 300
 sleep 0.3
+systemd-run --user --quiet --slice=gfbe2eshell.slice --unit=gfb-e2e-fakeshell sleep 300
+sleep 0.3
+launch_like_shell early
+EARLY_CHILD=$CHILD
 A=$SLICE_DIR/gfb-e2e-a.service
 B=$SLICE_DIR/gfb-e2e-b.service
 focus "$A" -1
 
 start_daemon
 expect_weight gfb-e2e-a 400 "the unit focused at startup is boosted"
+expect_cgroup "$EARLY_CHILD" "gfb-e2e-early-$EARLY_CHILD.scope" "a child stranded before startup is moved into its own scope"
+
+launch_like_shell late
+expect_cgroup "$CHILD" "gfb-e2e-late-$CHILD.scope" "a child stranded by a new launch is moved into its own scope"
+expect_cgroup "$(systemctl --user show gfb-e2e-fakeshell -p MainPID --value)" "gfb-e2e-fakeshell.service" "the shell's own process stays where it is"
 
 focus "$A" 1000
 focus "$B" -1

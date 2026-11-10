@@ -1,6 +1,7 @@
 mod booster;
 mod cgroup;
 mod focus;
+mod rescue;
 mod systemd;
 
 use std::env;
@@ -14,7 +15,8 @@ use tokio::time::{Instant, sleep_until};
 use zbus::connection;
 
 use crate::booster::Booster;
-use crate::focus::FocusWatcher;
+use crate::focus::{Change, FocusWatcher};
+use crate::rescue::Rescuer;
 use crate::systemd::SystemdUser;
 
 const BUS_NAME: &str = "org.luminusos.ForegroundBooster";
@@ -33,7 +35,15 @@ struct Args {
     /// Slice cgroup to watch instead of the user's app.slice (for tests)
     #[arg(long, hide = true)]
     app_slice: Option<PathBuf>,
+
+    /// GNOME Shell cgroup to rescue stranded processes from (for tests)
+    #[arg(long, hide = true)]
+    shell_cgroup: Option<PathBuf>,
 }
+
+// Retries after a new app unit appears: the launcher is moved into it right
+// after the cgroup is created, and stranded children can keep forking.
+const RESCUE_DELAYS_MS: [u64; 4] = [50, 300, 1000, 3000];
 
 fn state_path() -> Option<PathBuf> {
     if let Some(dir) = env::var_os("RUNTIME_DIRECTORY") {
@@ -64,10 +74,15 @@ async fn main() -> Result<()> {
         );
     }
 
-    let mut watcher = FocusWatcher::new(
-        args.app_slice
-            .unwrap_or_else(|| manager_dir.join("app.slice")),
-    )?;
+    let app_slice = args
+        .app_slice
+        .unwrap_or_else(|| manager_dir.join("app.slice"));
+    let mut watcher = FocusWatcher::new(app_slice.clone())?;
+    let rescuer = Rescuer::new(
+        app_slice,
+        manager_dir.join("session.slice"),
+        args.shell_cgroup,
+    );
 
     let connection = connection::Builder::session()
         .context("connecting to the session bus")?
@@ -78,13 +93,12 @@ async fn main() -> Result<()> {
         .await
         .context("another gnome-foreground-booster is already running")?;
 
-    let mut booster = Booster::new(
-        SystemdUser::new(connection.clone())
-            .await
-            .context("connecting to the systemd user manager")?,
-        args.weight,
-        state_path(),
-    );
+    let systemd = SystemdUser::new(connection.clone())
+        .await
+        .context("connecting to the systemd user manager")?;
+    rescuer.run(&systemd).await;
+
+    let mut booster = Booster::new(systemd, args.weight, state_path());
     booster.recover().await;
 
     let debounce = Duration::from_millis(args.debounce_ms);
@@ -94,16 +108,29 @@ async fn main() -> Result<()> {
     let mut sighup = signal(SignalKind::hangup())?;
 
     let mut pending = Some((watcher.current(), Instant::now()));
+    let mut rescues: Vec<Instant> = Vec::new();
 
     tracing::info!(weight = args.weight, "running");
 
     let result: Result<()> = loop {
         let deadline = pending.as_ref().map(|(_, at)| *at);
+        let rescue_at = rescues.first().copied();
         tokio::select! {
             change = watcher.next() => match change {
-                Ok(unit) => pending = Some((unit, Instant::now() + debounce)),
+                Ok(Change::Focus(unit)) => pending = Some((unit, Instant::now() + debounce)),
+                Ok(Change::UnitAdded) => {
+                    let now = Instant::now();
+                    rescues = RESCUE_DELAYS_MS
+                        .iter()
+                        .map(|ms| now + Duration::from_millis(*ms))
+                        .collect();
+                }
                 Err(error) => break Err(error.context("watching focus changes")),
             },
+            _ = async { sleep_until(rescue_at.unwrap()).await }, if rescue_at.is_some() => {
+                rescues.remove(0);
+                rescuer.run(booster.control()).await;
+            }
             _ = async { sleep_until(deadline.unwrap()).await }, if deadline.is_some() => {
                 if let Some((unit, _)) = pending.take() {
                     booster.focus(unit).await;
