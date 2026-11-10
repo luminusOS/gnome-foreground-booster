@@ -21,3 +21,6 @@ install-user:
 uninstall:
     rm -f {{prefix}}/bin/gnome-foreground-booster
     rm -f {{unitdir}}/gnome-foreground-booster.service
+
+e2e:
+    tests/e2e/run.sh
