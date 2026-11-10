@@ -1,0 +1,23 @@
+[Unit]
+Description=Boost the CPU weight of the focused GNOME application
+Documentation=https://github.com/luminusOS/gnome-foreground-booster
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=@BINDIR@/gnome-foreground-booster
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+RuntimeDirectory=gnome-foreground-booster
+RuntimeDirectoryPreserve=restart
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+
+[Install]
+WantedBy=graphical-session.target
