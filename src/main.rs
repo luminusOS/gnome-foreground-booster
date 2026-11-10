@@ -1,22 +1,23 @@
 mod booster;
-mod bridge;
 mod cgroup;
+mod focus;
 mod systemd;
 
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::Parser;
-use futures_util::StreamExt;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, sleep_until};
 use zbus::connection;
 
 use crate::booster::Booster;
-use crate::bridge::{BOOSTER_BUS_NAME, ForegroundProxy};
+use crate::focus::FocusWatcher;
 use crate::systemd::SystemdUser;
+
+const BUS_NAME: &str = "org.luminusos.ForegroundBooster";
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -28,19 +29,10 @@ struct Args {
     /// Time focus must stay on a window before the boost moves to it
     #[arg(long, default_value_t = 150)]
     debounce_ms: u64,
-}
 
-fn unit_for_focus(pid: u32, uid: u32) -> Option<String> {
-    if pid == 0 {
-        return None;
-    }
-    match cgroup::unit_for_pid(pid, uid) {
-        Ok(unit) => unit,
-        Err(error) => {
-            tracing::debug!(pid, %error, "could not read the cgroup of the focused process");
-            None
-        }
-    }
+    /// Slice cgroup to watch instead of the user's app.slice (for tests)
+    #[arg(long, hide = true)]
+    app_slice: Option<PathBuf>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -62,23 +54,29 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    if !cgroup::user_manager_delegates_cpu() {
+    let uid = cgroup::current_uid().context("reading the current uid")?;
+    let manager_dir = cgroup::user_manager_dir(uid);
+
+    if !cgroup::delegates_cpu(&manager_dir) {
         tracing::warn!(
             "the systemd user manager does not have the cpu controller delegated; \
              boosts will have no effect (see README: Delegate=cpu)"
         );
     }
 
-    let uid = cgroup::current_uid().context("reading the current uid")?;
+    let mut watcher = FocusWatcher::new(
+        args.app_slice
+            .unwrap_or_else(|| manager_dir.join("app.slice")),
+    )?;
 
     let connection = connection::Builder::session()
         .context("connecting to the session bus")?
         .build()
         .await?;
-
-    let bridge = ForegroundProxy::new(&connection).await?;
-    let mut changes = bridge.receive_focus_changed().await?;
-    let mut owner_changes = bridge.inner().receive_owner_changed().await?;
+    connection
+        .request_name(BUS_NAME)
+        .await
+        .context("another gnome-foreground-booster is already running")?;
 
     let mut booster = Booster::new(
         SystemdUser::new(connection.clone())
@@ -89,46 +87,26 @@ async fn main() -> Result<()> {
     );
     booster.recover().await;
 
-    connection
-        .request_name(BOOSTER_BUS_NAME)
-        .await
-        .context("another gnome-foreground-booster is already running")?;
-
     let debounce = Duration::from_millis(args.debounce_ms);
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sighup = signal(SignalKind::hangup())?;
 
-    let mut pending: Option<(u32, Instant)> = None;
+    let mut pending = Some((watcher.current(), Instant::now()));
 
     tracing::info!(weight = args.weight, "running");
 
     let result: Result<()> = loop {
-        let deadline = pending.map(|(_, at)| at);
+        let deadline = pending.as_ref().map(|(_, at)| *at);
         tokio::select! {
-            focus = changes.next() => {
-                let Some(focus) = focus else {
-                    break Err(anyhow!("the FocusChanged stream ended"));
-                };
-                match focus.args() {
-                    Ok(args) => pending = Some((args.pid, Instant::now() + debounce)),
-                    Err(error) => tracing::warn!(%error, "malformed FocusChanged"),
-                }
-            }
-            owner = owner_changes.next() => {
-                let Some(owner) = owner else {
-                    break Err(anyhow!("the bridge owner stream ended"));
-                };
-                if owner.is_none() {
-                    tracing::debug!("bridge left the bus; releasing the boost");
-                    pending = None;
-                    booster.release().await;
-                }
-            }
+            change = watcher.next() => match change {
+                Ok(unit) => pending = Some((unit, Instant::now() + debounce)),
+                Err(error) => break Err(error.context("watching focus changes")),
+            },
             _ = async { sleep_until(deadline.unwrap()).await }, if deadline.is_some() => {
-                if let Some((pid, _)) = pending.take() {
-                    booster.focus(unit_for_focus(pid, uid)).await;
+                if let Some((unit, _)) = pending.take() {
+                    booster.focus(unit).await;
                 }
             }
             _ = sigterm.recv() => break Ok(()),
