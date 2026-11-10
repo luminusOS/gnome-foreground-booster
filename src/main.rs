@@ -8,11 +8,12 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, sleep_until};
 use zbus::connection;
+use zbus::fdo::{RequestNameFlags, RequestNameReply};
 
 use crate::booster::Booster;
 use crate::focus::{Change, FocusWatcher};
@@ -88,10 +89,16 @@ async fn main() -> Result<()> {
         .context("connecting to the session bus")?
         .build()
         .await?;
-    connection
-        .request_name(BUS_NAME)
+    let reply = connection
+        .request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
         .await
         .context("another gnome-foreground-booster is already running")?;
+    if !matches!(
+        reply,
+        RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner
+    ) {
+        bail!("another gnome-foreground-booster is already running");
+    }
 
     let systemd = SystemdUser::new(connection.clone())
         .await
