@@ -117,6 +117,8 @@ cgroup v2 weights only compete between siblings, so the weight goes to the direc
 
 GNOME Shell moves a launched app into its own scope asynchronously, after the process has started. A launcher that forks right away, as AppImages do, leaves the real app behind in the Shell's cgroup, where Mutter attributes its windows to the Shell. The daemon looks for processes in `org.gnome.Shell@*.service` whose parent sits in an app unit, along with their descendants, and moves them into a new scope next to the launcher's with `StartTransientUnit`. It does this at startup and each time a new app unit appears. The Shell and the helpers it starts itself are left alone.
 
+[ARCHITECTURE.md](ARCHITECTURE.md) walks through the modules, the event loop and both flows with diagrams.
+
 Only the current user's `user@<uid>.service/app.slice` is watched. Any process of your user could set the same attribute to pick which of your own units gets boosted, which it could already do through systemd directly.
 
 ## Limitations
