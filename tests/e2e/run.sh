@@ -8,7 +8,6 @@ MANAGER_DIR=/sys/fs/cgroup/user.slice/user-$UID_.slice/user@$UID_.service
 SLICE_DIR=$MANAGER_DIR/app.slice/app-gfbe2e.slice
 SHELL_DIR=$MANAGER_DIR/gfbe2eshell.slice/gfb-e2e-fakeshell.service
 WORK=$(mktemp -d)
-STATE_DIR=${XDG_RUNTIME_DIR:?}/gnome-foreground-booster
 FAILED=0
 DAEMON=
 
@@ -29,7 +28,7 @@ expect_weight() {
 }
 
 start_daemon() {
-    RUST_LOG=gnome_foreground_booster=debug "$BIN" --app-slice "$SLICE_DIR" --shell-cgroup "$SHELL_DIR" >>"$WORK/daemon.log" 2>&1 &
+    RUNTIME_DIRECTORY="$WORK/runtime" RUST_LOG=gnome_foreground_booster=debug "$BIN" --app-slice "$SLICE_DIR" --shell-cgroup "$SHELL_DIR" >>"$WORK/daemon.log" 2>&1 &
     DAEMON=$!
     sleep 0.5
 }
@@ -64,7 +63,7 @@ cleanup() {
     [ -n "$DAEMON" ] && kill "$DAEMON" 2>/dev/null && wait "$DAEMON" 2>/dev/null
     systemctl --user stop gfb-e2e-a gfb-e2e-b gfb-e2e-c gfb-e2e-fakeshell app-gfbe2e-nested.slice app-gfbe2e.slice gfbe2eshell.slice 2>/dev/null
     jobs -p | xargs -r kill 2>/dev/null
-    rm -rf "$WORK" "$STATE_DIR/state"
+    rm -rf "$WORK"
 }
 trap cleanup EXIT
 
