@@ -27,6 +27,7 @@ jobs:
           persist-credentials: false
       - name: Build and test the RPM
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           version=$(rpmspec -q --srpm --qf '%{VERSION}' packaging/gnome-foreground-booster.spec)
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             [[ "$GITHUB_REF_NAME" == "v$version" ]] || { echo "Tag must be v$version"; exit 1; }
