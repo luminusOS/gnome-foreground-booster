@@ -1,0 +1,72 @@
+name: Fedora RPM
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: registry.fedoraproject.org/fedora@sha256:8f5853edbac9ec4084334d81590cce5566ca6c517ab793976ec41f8b62efda3f
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install Fedora build tools
+        run: dnf -y install git rpm-build cargo gcc systemd-rpm-macros tar gzip xz
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build and test the RPM
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          version=$(rpmspec -q --srpm --qf '%{VERSION}' packaging/gnome-foreground-booster.spec)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ "$GITHUB_REF_NAME" == "v$version" ]] || { echo "Tag must be v$version"; exit 1; }
+            git merge-base --is-ancestor HEAD origin/main || { echo 'Release tag must point to a commit on main'; exit 1; }
+          fi
+          export CARGO_HOME="$RUNNER_TEMP/cargo"
+          bash packaging/build-rpm.sh
+          mkdir release
+          name=gnome-foreground-booster
+          cp "dist/$version/$name-$version-1.fc45.x86_64.rpm" \
+             "dist/$version/$name-$version-1.fc45.src.rpm" \
+             "dist/$version/$name-$version.tar.gz" \
+             "dist/$version/$name-$version-vendor.tar.xz" release/
+          (cd release && sha256sum -- * > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fedora-45-x86_64-rpm
+          path: release/
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag' && github.repository == 'luminusOS/gnome-foreground-booster'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: fedora-45-x86_64-rpm
+          path: release
+      - name: Publish the Fedora RPM prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release
+          sha256sum -c SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" ./* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
+            --title "gnome-foreground-booster $GITHUB_REF_NAME" \
+            --notes "Fedora 45 x86_64 RPM for testing, built by GitHub Actions. The source RPM and archives contain the corresponding source."

@@ -40,6 +40,17 @@ A build, an export or a video encode running in the background gets the same CPU
 
 ## Installation
 
+The **Fedora RPM** GitHub Actions workflow builds and tests the Fedora 45
+x86_64 package. Pushing a version tag that matches `Cargo.toml` and points to
+a commit on `main` (for example, `v0.1.0`) publishes the RPM, corresponding
+source, and `SHA256SUMS` as a GitHub prerelease.
+
+To build a Fedora RPM, install `rpm-build`, `cargo`, `gcc`, `git`,
+`systemd-rpm-macros`, `tar`, `gzip`, and `xz`, then run `packaging/build-rpm.sh`.
+The binary and source RPMs, source archives, and checksums go into `dist/<version>/`.
+The build downloads the locked Rust dependencies once and then builds and
+tests the RPM offline. The RPM installs a systemd user unit.
+
 Build the release binary:
 
 ```sh
